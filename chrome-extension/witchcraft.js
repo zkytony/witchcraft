@@ -1,47 +1,11 @@
-/*
-    This is the background script, controlling all content scripts running on each tab. Since `manifest.json` is set to
-    background-persistent mode, a single instance will run, guaranteed not to leave memory and thus keeping its state.
- */
+export default class Witchcraft {
 
-// some declarations just to make linters stop complaining
-/**
- * @class chrome
- * @property runtime.onMessage.addListener
- * @property chrome.extension.getURL
- * @property tabs.onActivated
- * @property tabs.sendMessage
- * @property browserAction.setBadgeText
- * @property chrome.browserAction.setIcon
- * @property chrome.browserAction.setTitle
- */
-/**
- * // https://developer.chrome.com/extensions/tabs#type-Tab
- * @class Tab
- * @property {Number} id
- */
-/**
- * // https://developer.chrome.com/extensions/runtime#type-MessageSender
- * @class MessageSender
- * @property {Tab} tab
- * @property {Number} frameId
- */
-
-class Witchcraft {
-
-    /**
-     * chrome and document are being injected so they can be easily mocked in tests
-     *
-     * @param {chrome} chrome
-     * @param {Document} document
-     * @param {Analytics} analytics
-     */
-    constructor (chrome, document, analytics = undefined) {
+    constructor(chrome, document = null) {
         this.chrome = chrome;
         this.document = document;
-        this.analytics = analytics;
 
         this.emptySet = new Set();
-
+        this.scriptNamesByTabId = new Map();
         this.serverPort = 5743;
         this.defaultServerAddress = `http://127.0.0.1:${this.serverPort}/`;
         const savedServerAddress = typeof localStorage !== "undefined" && localStorage.getItem("server-address");
@@ -62,11 +26,11 @@ class Witchcraft {
             this.iconContext = iconCanvas.getContext("2d");
 
             this.iconImage = new Image();
-            this.iconImage.src = this.chrome.extension.getURL("/witch-16.png");
+            this.iconImage.src = this.chrome.runtime.getURL("/witch-16.png");
         }
 
         // fetch is only undefined during tests
-        this.fetch = typeof fetch === "undefined" ? (async () => {}) : fetch.bind(window);
+        this.fetch = typeof fetch === "undefined" ? (async () => {}) : fetch.bind(globalThis);
         this.fetchOptions = { cache: "no-store" };
 
         // either `// @include foo.js` or `/* @include foo.js */`
@@ -81,6 +45,7 @@ class Witchcraft {
         this.analytics && this.analytics.send("App", "Load");
 
         this.resetMetrics();
+        this.loadServerAddress();
     }
 
     resetMetrics() {
@@ -92,55 +57,53 @@ class Witchcraft {
         this.cssIncludesHitCount = 0;
         this.jsIncludesNotFoundCount = 0;
         this.cssIncludesNotFoundCount = 0;
+        this.scriptNamesByTabId.clear();
     }
 
-    /**
-     * @param {MessageSender} sender - the sender context of the content script that called us
-     */
+    async loadServerAddress() {
+        const result = await chrome.storage.local.get(['serverAddress']);
+        this.serverAddress = result.serverAddress || this.defaultServerAddress;
+    }
+
+    async getServerAddress() {
+        const result = await chrome.storage.local.get(['serverAddress']);
+        return result.serverAddress || this.defaultServerAddress;
+    }
+
+    async setServerAddress(address) {
+        address = address.trim();
+        if (!address) address = this.defaultServerAddress;
+        if (!address.endsWith("/")) address += "/";
+        this.serverAddress = address;
+        await chrome.storage.local.set({serverAddress: address});
+    }
+
     clearScriptsIfTopFrame(sender) {
         if (sender.frameId === 0) {
-            // this is the top frame; assume the tab is being reloaded and take the chance to reset its counter
-            const scripts = this.scriptNamesByTabId.get(sender.tab.id);
-            if (scripts) {
-                scripts.clear();
-            }
+            this.scriptNamesByTabId.delete(sender.tab.id);
         }
     }
 
-    /**
-     * @param {String} scriptFileName
-     * @param {Number} tabId
-     */
     registerScriptForTabId(scriptFileName, tabId) {
-        let scripts = this.scriptNamesByTabId.get(tabId);
-        if (!scripts) {
-            scripts = new Set();
-            this.scriptNamesByTabId.set(tabId, scripts);
+        if (!this.scriptNamesByTabId.has(tabId)) {
+            this.scriptNamesByTabId.set(tabId, new Set());
         }
-        scripts.add(scriptFileName);
+        this.scriptNamesByTabId.get(tabId).add(scriptFileName);
     }
 
-    /**
-     * @param {String} scriptFileName - the script file name to query for
-     * @param {String} scriptType
-     * @returns {Promise<String>} file contents or null if file does not exist
-     */
     async queryServerForFile(scriptFileName, scriptType) {
         try {
-            const fullUrl = this.fullUrlRegex.test(scriptFileName) ? scriptFileName : this.serverAddress + scriptFileName;
-            const response = await this.fetch(fullUrl, this.fetchOptions);
+            const fullUrl = this.fullUrlRegex.test(scriptFileName)
+                          ? scriptFileName
+                          : (this.serverAddress + scriptFileName);
+            const response = await fetch(fullUrl, this.fetchOptions);
             this.isServerReachable = true;
 
             if (response.status === 200) {
                 scriptType === Witchcraft.EXT_JS ? this.jsHitCount++ : this.cssHitCount++;
                 return await response.text();
-            } else if (response.status === 404) {
-                return null;
-            } else {
-                this.errorCount++;
-                this.isServerReachable = false;
-                return null;
             }
+            return null;
         } catch (e) {
             this.failCount++;
             this.isServerReachable = false;
@@ -159,9 +122,9 @@ class Witchcraft {
         this.resetMetrics();
 
         await this.loadScript(this.joinNameAndExtension(Witchcraft.globalScriptName, Witchcraft.EXT_JS),
-            Witchcraft.EXT_JS, sender);
+                              Witchcraft.EXT_JS, sender);
         await this.loadScript(this.joinNameAndExtension(Witchcraft.globalScriptName, Witchcraft.EXT_CSS),
-            Witchcraft.EXT_CSS, sender);
+                              Witchcraft.EXT_CSS, sender);
 
         for (const domain of Witchcraft.iterateDomainLevels(location.hostname)) {
             await this.loadScript(this.joinNameAndExtension(domain, Witchcraft.EXT_JS), Witchcraft.EXT_JS, sender);
@@ -170,9 +133,9 @@ class Witchcraft {
 
         for (const segment of Witchcraft.iteratePathSegments(location.pathname)) {
             await this.loadScript(this.joinNameAndExtension(location.hostname + segment, Witchcraft.EXT_JS),
-                Witchcraft.EXT_JS, sender);
+                                  Witchcraft.EXT_JS, sender);
             await this.loadScript(this.joinNameAndExtension(location.hostname + segment, Witchcraft.EXT_CSS),
-                Witchcraft.EXT_CSS, sender);
+                                  Witchcraft.EXT_CSS, sender);
         }
 
         this.updateIconAndTitle(sender.tab.id);
@@ -327,7 +290,7 @@ class Witchcraft {
         let delta = 0;
         for (const directive of directives) {
             expandedScript = Witchcraft.spliceString(expandedScript, directive.startIndex + delta,
-                directive.endIndex + delta, directive.scriptContent);
+                                                     directive.endIndex + delta, directive.scriptContent);
             const oldLength = directive.endIndex - directive.startIndex;
             const newLength = directive.scriptContent.length;
             delta += newLength - oldLength;
@@ -343,7 +306,7 @@ class Witchcraft {
      */
     *findIncludedScriptNames(script, scriptType) {
         const includeDirective = scriptType === Witchcraft.EXT_CSS ?
-            this.includeDirectiveRegexCss : this.includeDirectiveRegexJs;
+                                 this.includeDirectiveRegexCss : this.includeDirectiveRegexJs;
 
         // important to reset the regex cursor before starting
         includeDirective.lastIndex = 0;
@@ -383,7 +346,7 @@ class Witchcraft {
      * Redraws extension icon with loaded script count for current tab. Also shows a red exclamation mark if file server
      * is not reachable.
      *
-     * Better than using chrome.browserAction.setBadgeText(). Not only text color is not configurable, it also restricts
+     * Better than using chrome.action.setBadgeText(). Not only text color is not configurable, it also restricts
      * font size, positioning, etc.
      *
      * @param {Number} count
@@ -410,7 +373,7 @@ class Witchcraft {
         }
 
         const imageData = this.iconContext.getImageData(0, 0, this.iconSize, this.iconSize);
-        this.chrome.browserAction.setIcon({ imageData: imageData, tabId: tabId });
+        this.chrome.action.setIcon({ imageData: imageData, tabId: tabId });
     }
 
     /**
@@ -426,7 +389,7 @@ class Witchcraft {
 
         const countStr = count.toString();
         const title = `Witchcraft (${count === 0 ? "no" : countStr} script${count === 1 ? "" : "s"} loaded)`;
-        this.chrome.browserAction.setTitle({ title: title, tabId: tabId });
+        this.chrome.action.setTitle({ title: title, tabId: tabId });
     }
 
     /**
@@ -481,6 +444,4 @@ Witchcraft.CSS_INCLUDE_HITS = ["Scripts", "CSS include hits", undefined];
 Witchcraft.JS_INCLUDES_NOT_FOUND = ["Scripts", "JS includes not found", undefined];
 Witchcraft.CSS_INCLUDES_NOT_FOUND = ["Scripts", "CSS includes not found", undefined];
 
-if (typeof module !== "undefined" && typeof module.exports !== "undefined") {
-    module.exports = Witchcraft;  // used by Node.js when testing
-}
+self.Witchcraft = Witchcraft; // Make class global for background.js

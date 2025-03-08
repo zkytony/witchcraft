@@ -1,9 +1,13 @@
+import Witchcraft from './witchcraft.js';
 
-// bind it to window so it can be accessed from the popup screen
-if (typeof Analytics === "function") {  // will be undefined during tests
-    window.analytics = new Analytics();
-    window.analytics.send("Background", "Load");
-}
+// Now Witchcraft is available globally
+const witchcraft = new Witchcraft(chrome, null);
 
-// bind it to window so it can be accessed from the popup screen
-window.witchcraft = new Witchcraft(chrome, typeof document !== "undefined" ? document : undefined, window.analytics);
+// Listen for messages explicitly from content scripts
+chrome.runtime.onMessage.addListener((location, sender) => {
+    witchcraft.onScriptRequest(location, sender);
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+    console.log('Witchcraft background service worker is running (MV3).');
+});

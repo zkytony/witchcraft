@@ -39,3 +39,5 @@ class Analytics {
 if (typeof module !== "undefined" && typeof module.exports !== "undefined") {
     module.exports = Analytics;  // used by Node.js when testing
 }
+
+export default Analytics;
